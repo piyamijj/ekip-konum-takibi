@@ -1,20 +1,31 @@
 // Data store for team members and their locations.
 //
-// This is backed by Vercel KV (Redis) so data persists across serverless
-// invocations and multiple instances — required for a real Vercel
-// deployment, where each request may hit a different lambda instance and
-// plain in-memory storage would appear to randomly "forget" members and
-// locations.
+// This is backed by Upstash Redis (via the official @upstash/redis SDK) so
+// data persists across serverless invocations and multiple instances —
+// required for a real Vercel deployment, where each request may hit a
+// different lambda instance and plain in-memory storage would appear to
+// randomly "forget" members and locations.
 //
-// When no KV environment variables are present (e.g. local development
-// without `vercel env pull` / without a linked KV store), this falls back
-// to a simple in-memory Map so `npm run dev` still works out of the box.
-// Every function is async so callers never need to know which backend is
-// actually in use.
+// Vercel's Storage > Upstash for Redis integration provisions these two
+// environment variables automatically once connected to the project:
+//   KV_REST_API_URL
+//   KV_REST_API_TOKEN
 //
-// See README.md, "Vercel KV Kurulumu" for how to attach a real KV store to
-// your Vercel project.
+// When those are not present (e.g. local development without `vercel env
+// pull` / without a linked Redis database), this falls back to a simple
+// in-memory Map so `npm run dev` still works out of the box. Every function
+// is async so callers never need to know which backend is actually in use.
+//
+// The Redis client is created with a static import and a concrete type
+// (Redis | null) rather than a dynamically-imported `any` — calling a
+// generic method like `.get<T>()` on an untyped (`any`) value is rejected
+// by TypeScript ("Untyped function calls may not accept type arguments"),
+// which is exactly what broke the previous @vercel/kv-based version.
+//
+// See README.md, "Vercel KV Kurulumu" for how to attach a real Upstash
+// Redis database to your Vercel project.
 
+import { Redis } from "@upstash/redis";
 import type { LocationRecord, MemberWithLocation, TeamMember } from "./types";
 
 const KV_MEMBER_PREFIX = "member:";
@@ -22,12 +33,16 @@ const KV_MEMBER_BY_NAME_PREFIX = "member:byname:";
 const KV_LOCATION_PREFIX = "location:";
 const KV_MEMBER_INDEX_KEY = "members:index";
 
-const hasKv = Boolean(
-  process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN
-);
+const redisUrl = process.env.KV_REST_API_URL;
+const redisToken = process.env.KV_REST_API_TOKEN;
+
+const redis: Redis | null =
+  redisUrl && redisToken ? new Redis({ url: redisUrl, token: redisToken }) : null;
+
+const hasRedis = redis !== null;
 
 // ---------------------------------------------------------------------------
-// In-memory fallback (local dev only — not used when KV env vars are set)
+// In-memory fallback (local dev only — not used when Redis env vars are set)
 // ---------------------------------------------------------------------------
 
 declare global {
@@ -47,22 +62,6 @@ if (process.env.NODE_ENV !== "production") {
   global.__memberLocations = memoryLocations;
 }
 
-// ---------------------------------------------------------------------------
-// Vercel KV client (lazy-loaded so the in-memory fallback never needs the
-// @vercel/kv package to be configured with real credentials)
-// ---------------------------------------------------------------------------
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let kvClient: any = null;
-
-async function getKv() {
-  if (!kvClient) {
-    const mod = await import("@vercel/kv");
-    kvClient = mod.kv;
-  }
-  return kvClient;
-}
-
 function normalizeName(name: string): string {
   return name.trim().toLowerCase();
 }
@@ -72,11 +71,10 @@ function normalizeName(name: string): string {
 // ---------------------------------------------------------------------------
 
 export async function createMember(member: TeamMember): Promise<TeamMember> {
-  if (hasKv) {
-    const kv = await getKv();
-    await kv.set(`${KV_MEMBER_PREFIX}${member.id}`, member);
-    await kv.set(`${KV_MEMBER_BY_NAME_PREFIX}${normalizeName(member.name)}`, member.id);
-    await kv.sadd(KV_MEMBER_INDEX_KEY, member.id);
+  if (hasRedis && redis) {
+    await redis.set(`${KV_MEMBER_PREFIX}${member.id}`, member);
+    await redis.set(`${KV_MEMBER_BY_NAME_PREFIX}${normalizeName(member.name)}`, member.id);
+    await redis.sadd(KV_MEMBER_INDEX_KEY, member.id);
     return member;
   }
 
@@ -85,9 +83,8 @@ export async function createMember(member: TeamMember): Promise<TeamMember> {
 }
 
 export async function getMember(memberId: string): Promise<TeamMember | null> {
-  if (hasKv) {
-    const kv = await getKv();
-    const member = await kv.get<TeamMember>(`${KV_MEMBER_PREFIX}${memberId}`);
+  if (hasRedis && redis) {
+    const member = await redis.get<TeamMember>(`${KV_MEMBER_PREFIX}${memberId}`);
     return member ?? null;
   }
 
@@ -97,9 +94,8 @@ export async function getMember(memberId: string): Promise<TeamMember | null> {
 export async function getMemberByName(name: string): Promise<TeamMember | null> {
   const normalized = normalizeName(name);
 
-  if (hasKv) {
-    const kv = await getKv();
-    const memberId = await kv.get<string>(`${KV_MEMBER_BY_NAME_PREFIX}${normalized}`);
+  if (hasRedis && redis) {
+    const memberId = await redis.get<string>(`${KV_MEMBER_BY_NAME_PREFIX}${normalized}`);
     if (!memberId) return null;
     return getMember(memberId);
   }
@@ -116,18 +112,17 @@ export async function setSharingEnabled(
   memberId: string,
   sharingEnabled: boolean
 ): Promise<TeamMember | null> {
-  if (hasKv) {
-    const kv = await getKv();
-    const member = await kv.get<TeamMember>(`${KV_MEMBER_PREFIX}${memberId}`);
+  if (hasRedis && redis) {
+    const member = await redis.get<TeamMember>(`${KV_MEMBER_PREFIX}${memberId}`);
     if (!member) return null;
 
     const updated: TeamMember = { ...member, sharingEnabled };
-    await kv.set(`${KV_MEMBER_PREFIX}${memberId}`, updated);
+    await redis.set(`${KV_MEMBER_PREFIX}${memberId}`, updated);
 
     // Consent is revocable at any time: if sharing is turned off, immediately
     // drop the last known location instead of keeping a stale/frozen pin.
     if (!sharingEnabled) {
-      await kv.del(`${KV_LOCATION_PREFIX}${memberId}`);
+      await redis.del(`${KV_LOCATION_PREFIX}${memberId}`);
     }
 
     return updated;
@@ -146,9 +141,8 @@ export async function setSharingEnabled(
 }
 
 export async function upsertLocation(record: LocationRecord): Promise<LocationRecord> {
-  if (hasKv) {
-    const kv = await getKv();
-    await kv.set(`${KV_LOCATION_PREFIX}${record.memberId}`, record);
+  if (hasRedis && redis) {
+    await redis.set(`${KV_LOCATION_PREFIX}${record.memberId}`, record);
     return record;
   }
 
@@ -157,9 +151,8 @@ export async function upsertLocation(record: LocationRecord): Promise<LocationRe
 }
 
 export async function clearLocation(memberId: string): Promise<void> {
-  if (hasKv) {
-    const kv = await getKv();
-    await kv.del(`${KV_LOCATION_PREFIX}${memberId}`);
+  if (hasRedis && redis) {
+    await redis.del(`${KV_LOCATION_PREFIX}${memberId}`);
     return;
   }
 
@@ -167,13 +160,12 @@ export async function clearLocation(memberId: string): Promise<void> {
 }
 
 export async function listMembersWithLocations(): Promise<MemberWithLocation[]> {
-  if (hasKv) {
-    const kv = await getKv();
-    const memberIds = await kv.smembers<string[]>(KV_MEMBER_INDEX_KEY);
+  if (hasRedis && redis) {
+    const memberIds = await redis.smembers(KV_MEMBER_INDEX_KEY);
     if (!memberIds || memberIds.length === 0) return [];
 
     const members = await Promise.all(
-      memberIds.map((id: string) => kv.get<TeamMember>(`${KV_MEMBER_PREFIX}${id}`))
+      memberIds.map((id) => redis.get<TeamMember>(`${KV_MEMBER_PREFIX}${id}`))
     );
 
     const results = await Promise.all(
@@ -181,7 +173,7 @@ export async function listMembersWithLocations(): Promise<MemberWithLocation[]> 
         .filter((m): m is TeamMember => Boolean(m))
         .map(async (member) => {
           const location = member.sharingEnabled
-            ? (await kv.get<LocationRecord>(`${KV_LOCATION_PREFIX}${member.id}`)) ?? null
+            ? (await redis.get<LocationRecord>(`${KV_LOCATION_PREFIX}${member.id}`)) ?? null
             : null;
           return { ...member, location };
         })
@@ -197,9 +189,8 @@ export async function listMembersWithLocations(): Promise<MemberWithLocation[]> 
 }
 
 export async function countMembers(): Promise<number> {
-  if (hasKv) {
-    const kv = await getKv();
-    const memberIds = await kv.smembers<string[]>(KV_MEMBER_INDEX_KEY);
+  if (hasRedis && redis) {
+    const memberIds = await redis.smembers(KV_MEMBER_INDEX_KEY);
     return memberIds?.length ?? 0;
   }
 

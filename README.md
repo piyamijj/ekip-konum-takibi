@@ -36,7 +36,7 @@ Uygulama yalnızca, tarayıcısından **Geolocation API** izni açıkça veren c
 - Her ekip üyesi telefonunda bu web uygulamasını açar (isteğe bağlı olarak **PWA** olarak ana ekrana ekleyebilir), `/join` sayfasından davet kodu + adını girer.
 - Konum paylaşımını açtığında tarayıcının **yerleşik izin penceresi** çıkar; kullanıcı ne için izin verdiğini görür ve reddedebilir.
 - İzin verildikten sonra cihaz, sayfa açıkken periyodik olarak (varsayılan 45 saniyede bir) `/api/location/update` uç noktasına kendi konumunu gönderir.
-- Konumlar **Vercel KV (Redis)** üzerinde saklanır — sunucusuz (serverless) ortamda örnekler arası tutarlılık için gereklidir. Vercel KV bağlı değilse (örn. yerel geliştirmede), uygulama otomatik olarak bellek içi (in-memory) depolamaya düşer; her iki durumda da `lib/store.ts` aynı fonksiyonları kullanır, üst katmanlarda hiçbir fark yaratmaz.
+- Konumlar **Vercel KV (Upstash for Redis)** üzerinde saklanır — sunucusuz (serverless) ortamda örnekler arası tutarlılık için gereklidir. Vercel KV/Upstash bağlı değilse (örn. yerel geliştirmede), uygulama otomatik olarak bellek içi (in-memory) depolamaya düşer; her iki durumda da `lib/store.ts` aynı fonksiyonları kullanır, üst katmanlarda hiçbir fark yaratmaz.
 - `/dashboard` sayfası, **OpenStreetMap + React-Leaflet** ile haritada her ekip üyesinin son bilinen konumunu, son güncelleme zamanını ve aktif/pasif durumunu gösterir.
 - Kimlik doğrulama basittir: paylaşılan bir davet kodu + ad girişi ile kişi bazlı ayrım sağlanır (karmaşık kullanıcı/şifre sistemi yoktur).
 
@@ -116,7 +116,7 @@ Tüm değişkenler `.env.local.example` dosyasında şablon olarak bulunur; **ge
 | `NEXT_PUBLIC_LOCATION_UPDATE_INTERVAL_MS` | Cihazın konumunu gönderme sıklığı (ms) | `45000` |
 | `STALE_THRESHOLD_MS` | Bu süreden eski güncellemeler panoda "bayat/çevrimdışı" gösterilir (ms) | `120000` |
 | `NEXT_PUBLIC_DASHBOARD_POLL_INTERVAL_MS` | Panonun sunucudan veri yenileme sıklığı (ms) | `15000` |
-| `KV_REST_API_URL` / `KV_REST_API_TOKEN` | **Üretimde zorunlu.** Vercel KV bağlantı bilgileri — Vercel'de bir KV Store bağladığınızda otomatik eklenir, elle girmeniz gerekmez. Bkz. [Vercel KV Kurulumu](#vercel-kv-kurulumu-kalıcı-veri-deposu) | — (tanımsızsa bellek içi depolamaya düşer) |
+| `KV_REST_API_URL` / `KV_REST_API_TOKEN` | **Üretimde zorunlu.** Vercel Storage > Upstash for Redis bağlantı bilgileri — projeye bağladığınızda otomatik eklenir, elle girmeniz gerekmez. Bkz. [Vercel KV Kurulumu](#vercel-kv-kurulumu-kalıcı-veri-deposu) | — (tanımsızsa bellek içi depolamaya düşer) |
 | `POSTGRES_URL` / `POSTGRES_PRISMA_URL` / `POSTGRES_URL_NON_POOLING` | (Opsiyonel, alternatif) Vercel Postgres kullanacaksanız — bkz. [Gerçek Veritabanına Geçiş](#gerçek-veritabanına-geçiş-alternatif-postgressupabase) | — |
 | `NEXT_PUBLIC_SUPABASE_URL` / `NEXT_PUBLIC_SUPABASE_ANON_KEY` / `SUPABASE_SERVICE_ROLE_KEY` | (Opsiyonel, alternatif) Supabase kullanacaksanız | — |
 
@@ -139,13 +139,13 @@ Tüm değişkenler `.env.local.example` dosyasında şablon olarak bulunur; **ge
 
 ## Vercel KV Kurulumu (Kalıcı Veri Deposu)
 
-Uygulama, üyeleri ve konumları **Vercel KV (Redis tabanlı, ücretsiz katmanı yeterli)** üzerinde saklayacak şekilde yapılandırılmıştır. Bu adım **atlanamaz** — atlanırsa uygulama otomatik olarak bellek içi depolamaya düşer ve Vercel'in sunucusuz ortamında veriler örnekler arasında tutarsız görünür (bkz. yukarıdaki uyarı kutusu).
+Uygulama, üyeleri ve konumları **Vercel Storage > Upstash for Redis (ücretsiz katmanı yeterli)** üzerinde saklayacak şekilde yapılandırılmıştır. Bu adım **atlanamaz** — atlanırsa uygulama otomatik olarak bellek içi depolamaya düşer ve Vercel'in sunucusuz ortamında veriler örnekler arasında tutarsız görünür (bkz. yukarıdaki uyarı kutusu).
 
 Kurulum, projeyi Vercel'e ilk deploy ettikten sonra yapılır (bkz. [Vercel'e Deploy](#vercele-deploy)):
 
 1. Vercel Dashboard'da projenizi açın.
 2. Üst menüden **Storage** sekmesine gidin.
-3. **Create Database** → **KV** (Redis) seçin. Ücretsiz (Hobby) katman küçük bir ekip için fazlasıyla yeterlidir.
+3. **Create Database** → **Upstash** → **Redis** seçin (Vercel arayüzünde bazen sade "KV" olarak da görünebilir, ikisi aynı entegrasyondur). Ücretsiz (Hobby) katman küçük bir ekip için fazlasıyla yeterlidir.
 4. Veritabanına bir isim verin (örn. `ekip-konum-kv`) ve bölge (region) olarak projenizin kendi bölgesini seçin.
 5. Oluşturduktan sonra **Connect Project** ile bu KV Store'u `ekip-konum-takibi` projenize bağlayın. Vercel bu adımda `KV_REST_API_URL` ve `KV_REST_API_TOKEN` ortam değişkenlerini **otomatik olarak** projenizin Production/Preview/Development ortamlarına ekler — elle bir şey girmenize gerek yoktur.
 6. Vercel projenizde **Deployments** sekmesine gidip en son deploy'un yanındaki menüden **Redeploy** yapın (veya `main` branch'e boş bir commit push edin). Bu adım şarttır: KV bağlantısı yalnızca yeni bir deploy ile devreye girer, mevcut çalışan deploy'u otomatik güncellemez.
