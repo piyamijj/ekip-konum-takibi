@@ -21,11 +21,12 @@ Uygulama yalnızca, tarayıcısından **Geolocation API** izni açıkça veren c
 3. [Yerel Kurulum](#yerel-kurulum)
 4. [Ortam Değişkenleri](#ortam-değişkenleri)
 5. [Kullanım](#kullanım)
-6. [Gerçek Veritabanına Geçiş](#gerçek-veritabanına-geçiş)
-7. [Vercel'e Deploy](#vercele-deploy)
-8. [Güvenlik ve Rıza İlkeleri](#güvenlik-ve-rıza-i̇lkeleri)
-9. [ÖNEMLİ: API Anahtarlarınızı Rotate Edin](#önemli-api-anahtarlarınızı-rotate-edin)
-10. [Sınırlamalar ve Yol Haritası](#sınırlamalar-ve-yol-haritası)
+6. [Vercel KV Kurulumu (Kalıcı Veri Deposu)](#vercel-kv-kurulumu-kalıcı-veri-deposu)
+7. [Gerçek Veritabanına Geçiş (Alternatif: Postgres/Supabase)](#gerçek-veritabanına-geçiş-alternatif-postgressupabase)
+8. [Vercel'e Deploy](#vercele-deploy)
+9. [Güvenlik ve Rıza İlkeleri](#güvenlik-ve-rıza-i̇lkeleri)
+10. [ÖNEMLİ: API Anahtarlarınızı Rotate Edin](#önemli-api-anahtarlarınızı-rotate-edin)
+11. [Sınırlamalar ve Yol Haritası](#sınırlamalar-ve-yol-haritası)
 
 ---
 
@@ -35,7 +36,7 @@ Uygulama yalnızca, tarayıcısından **Geolocation API** izni açıkça veren c
 - Her ekip üyesi telefonunda bu web uygulamasını açar (isteğe bağlı olarak **PWA** olarak ana ekrana ekleyebilir), `/join` sayfasından davet kodu + adını girer.
 - Konum paylaşımını açtığında tarayıcının **yerleşik izin penceresi** çıkar; kullanıcı ne için izin verdiğini görür ve reddedebilir.
 - İzin verildikten sonra cihaz, sayfa açıkken periyodik olarak (varsayılan 45 saniyede bir) `/api/location/update` uç noktasına kendi konumunu gönderir.
-- Konumlar varsayılan olarak **bellek içi (in-memory)** bir depoda saklanır; kolayca gerçek bir veritabanına (Vercel Postgres / Supabase) geçirilebilecek şekilde `lib/store.ts` içinde soyutlanmıştır.
+- Konumlar **Vercel KV (Redis)** üzerinde saklanır — sunucusuz (serverless) ortamda örnekler arası tutarlılık için gereklidir. Vercel KV bağlı değilse (örn. yerel geliştirmede), uygulama otomatik olarak bellek içi (in-memory) depolamaya düşer; her iki durumda da `lib/store.ts` aynı fonksiyonları kullanır, üst katmanlarda hiçbir fark yaratmaz.
 - `/dashboard` sayfası, **OpenStreetMap + React-Leaflet** ile haritada her ekip üyesinin son bilinen konumunu, son güncelleme zamanını ve aktif/pasif durumunu gösterir.
 - Kimlik doğrulama basittir: paylaşılan bir davet kodu + ad girişi ile kişi bazlı ayrım sağlanır (karmaşık kullanıcı/şifre sistemi yoktur).
 
@@ -115,10 +116,13 @@ Tüm değişkenler `.env.local.example` dosyasında şablon olarak bulunur; **ge
 | `NEXT_PUBLIC_LOCATION_UPDATE_INTERVAL_MS` | Cihazın konumunu gönderme sıklığı (ms) | `45000` |
 | `STALE_THRESHOLD_MS` | Bu süreden eski güncellemeler panoda "bayat/çevrimdışı" gösterilir (ms) | `120000` |
 | `NEXT_PUBLIC_DASHBOARD_POLL_INTERVAL_MS` | Panonun sunucudan veri yenileme sıklığı (ms) | `15000` |
-| `POSTGRES_URL` / `POSTGRES_PRISMA_URL` / `POSTGRES_URL_NON_POOLING` | (Opsiyonel) Vercel Postgres kullanacaksanız — bkz. [Gerçek Veritabanına Geçiş](#gerçek-veritabanına-geçiş) | — |
-| `NEXT_PUBLIC_SUPABASE_URL` / `NEXT_PUBLIC_SUPABASE_ANON_KEY` / `SUPABASE_SERVICE_ROLE_KEY` | (Opsiyonel) Supabase kullanacaksanız | — |
+| `KV_REST_API_URL` / `KV_REST_API_TOKEN` | **Üretimde zorunlu.** Vercel KV bağlantı bilgileri — Vercel'de bir KV Store bağladığınızda otomatik eklenir, elle girmeniz gerekmez. Bkz. [Vercel KV Kurulumu](#vercel-kv-kurulumu-kalıcı-veri-deposu) | — (tanımsızsa bellek içi depolamaya düşer) |
+| `POSTGRES_URL` / `POSTGRES_PRISMA_URL` / `POSTGRES_URL_NON_POOLING` | (Opsiyonel, alternatif) Vercel Postgres kullanacaksanız — bkz. [Gerçek Veritabanına Geçiş](#gerçek-veritabanına-geçiş-alternatif-postgressupabase) | — |
+| `NEXT_PUBLIC_SUPABASE_URL` / `NEXT_PUBLIC_SUPABASE_ANON_KEY` / `SUPABASE_SERVICE_ROLE_KEY` | (Opsiyonel, alternatif) Supabase kullanacaksanız | — |
 
 `INVITE_CODE` değerini üretim ortamında mutlaka varsayılandan farklı, tahmin edilmesi zor bir değere değiştirin.
+
+> **Üretim için önemli:** `KV_REST_API_URL` / `KV_REST_API_TOKEN` tanımlı değilse uygulama bellek içi depolamaya düşer. Vercel'in sunucusuz ortamında bu, istekler farklı örneklere (instance) dağıldığında **verinin kaybolması veya tutarsız görünmesi** (örn. pano "Ekip Üyeleri (0)" gösterir, ya da konum paylaşımı birkaç saniye sonra kapanmış gibi davranır) anlamına gelir. Vercel'e deploy ederken KV Store bağlamak bu yüzden bir seçenek değil, **zorunlu bir adımdır** — aşağıdaki bölümü uygulayın.
 
 ---
 
@@ -133,18 +137,31 @@ Tüm değişkenler `.env.local.example` dosyasında şablon olarak bulunur; **ge
 
 ---
 
-## Gerçek Veritabanına Geçiş
+## Vercel KV Kurulumu (Kalıcı Veri Deposu)
 
-Uygulama varsayılan olarak **bellek içi (in-memory)** depolama kullanır (`lib/store.ts`). Bu, hızlı başlamak için idealdir ama iki önemli sınırlaması vardır:
+Uygulama, üyeleri ve konumları **Vercel KV (Redis tabanlı, ücretsiz katmanı yeterli)** üzerinde saklayacak şekilde yapılandırılmıştır. Bu adım **atlanamaz** — atlanırsa uygulama otomatik olarak bellek içi depolamaya düşer ve Vercel'in sunucusuz ortamında veriler örnekler arasında tutarsız görünür (bkz. yukarıdaki uyarı kutusu).
 
-- Sunucu yeniden başladığında (veya yeniden deploy edildiğinde) tüm veriler sıfırlanır.
-- Vercel gibi sunucusuz (serverless) platformlarda, farklı istekler farklı sunucu örneklerine (instance) düşebilir; bu durumda üyeler ve konumlar örnekler arasında tutarsız görünebilir.
+Kurulum, projeyi Vercel'e ilk deploy ettikten sonra yapılır (bkz. [Vercel'e Deploy](#vercele-deploy)):
 
-Küçük bir ekip için kısa süreli/deneme amaçlı kullanımda bu sınırlamalar çoğunlukla sorun yaratmaz, ancak kalıcı ve güvenilir bir kurulum için gerçek bir veritabanına geçmeniz önerilir:
+1. Vercel Dashboard'da projenizi açın.
+2. Üst menüden **Storage** sekmesine gidin.
+3. **Create Database** → **KV** (Redis) seçin. Ücretsiz (Hobby) katman küçük bir ekip için fazlasıyla yeterlidir.
+4. Veritabanına bir isim verin (örn. `ekip-konum-kv`) ve bölge (region) olarak projenizin kendi bölgesini seçin.
+5. Oluşturduktan sonra **Connect Project** ile bu KV Store'u `ekip-konum-takibi` projenize bağlayın. Vercel bu adımda `KV_REST_API_URL` ve `KV_REST_API_TOKEN` ortam değişkenlerini **otomatik olarak** projenizin Production/Preview/Development ortamlarına ekler — elle bir şey girmenize gerek yoktur.
+6. Vercel projenizde **Deployments** sekmesine gidip en son deploy'un yanındaki menüden **Redeploy** yapın (veya `main` branch'e boş bir commit push edin). Bu adım şarttır: KV bağlantısı yalnızca yeni bir deploy ile devreye girer, mevcut çalışan deploy'u otomatik güncellemez.
+7. Redeploy tamamlandıktan sonra `/join` üzerinden katılıp konum paylaşımını açın; `/dashboard` artık üyeyi ve konumunu kalıcı ve tutarlı şekilde göstermelidir.
+
+Yerel geliştirmede KV kullanmak isterseniz: adım 5'teki değerleri `vercel env pull .env.local` komutuyla yerel `.env.local` dosyanıza çekebilirsiniz; istemezseniz uygulama yerelde otomatik olarak bellek içi depolamaya düşmeye devam eder (geliştirme için sorun değildir).
+
+---
+
+## Gerçek Veritabanına Geçiş (Alternatif: Postgres/Supabase)
+
+Vercel KV bu proje için varsayılan ve önerilen çözümdür. Ancak dilerseniz `lib/store.ts` içindeki fonksiyonları (`createMember`, `getMember`, `upsertLocation`, `listMembersWithLocations` vb.) aynı imzalarla koruyarak Postgres/Supabase gibi başka bir veritabanına da geçirebilirsiniz. API route dosyaları (`app/api/**/route.ts`) bu fonksiyonları çağırdığı için **hiçbir değişiklik gerektirmez**.
 
 1. **Vercel Postgres veya Supabase (ücretsiz katman) seçin** ve projenizi oluşturun.
 2. Bağlantı bilgilerini `.env.local` (yerelde) ve Vercel projonuzun **Environment Variables** panelinde (üretimde) tanımlayın.
-3. `lib/store.ts` içindeki fonksiyonları (`createMember`, `getMember`, `upsertLocation`, `listMembersWithLocations` vb.) aynı imzalarla, gerçek veritabanı sorgularını çalıştıracak şekilde yeniden yazın. API route dosyaları (`app/api/**/route.ts`) bu fonksiyonları çağırdığı için **hiçbir değişiklik gerektirmez**.
+3. `lib/store.ts` içindeki `hasKv` kontrolüne benzer şekilde, yeni backend'i kullanacak bir dal ekleyin ya da KV çağrılarının yerine geçirin.
 4. Önerilen basit tablo şeması:
 
 ```sql
@@ -223,7 +240,7 @@ Yeni anahtarları yalnızca kendi `.env.local` dosyanızda veya Vercel projenizi
 
 ## Sınırlamalar ve Yol Haritası
 
-- Bellek içi depolama, kalıcılık gerektiren üretim kullanımı için gerçek bir veritabanı ile değiştirilmelidir (bkz. yukarıdaki bölüm).
+- Vercel KV bağlanmadan (yalnızca bellek içi depolamayla) üretimde kullanılması **önerilmez** — bkz. [Vercel KV Kurulumu](#vercel-kv-kurulumu-kalıcı-veri-deposu). Yerel geliştirmede bellek içi mod pratik ve yeterlidir.
 - Konum yalnızca ilgili sayfa/PWA tarayıcıda açıkken gönderilir; tarayıcı tamamen kapatıldığında veya cihaz kilitlendiğinde periyodik gönderim durabilir (bu, tarayıcıların arka plan kısıtlamalarından kaynaklanır ve kasıtlı bir mahremiyet-dostu davranıştır — arka planda gizlice takip yapılmaz).
 - Kimlik doğrulama basit tutulmuştur (davet kodu + ad); daha büyük veya daha resmi bir kurulum isterseniz gerçek bir kimlik doğrulama sistemi (ör. NextAuth) eklenebilir.
 - Bu proje kasıtlı olarak küçük ve odaklı tutulmuştur; OSINT/gözetim yönünde herhangi bir genişletme talebi bu projenin amacı dışındadır ve uygulanmayacaktır.
